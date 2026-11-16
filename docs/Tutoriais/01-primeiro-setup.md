@@ -19,7 +19,7 @@ conhecimento prévio de Next.js ou Supabase — siga os passos na ordem.
 Abra o terminal e rode:
 
 ```bash
-git clone https://github.com/bernardoguerraa/mycash.git
+git clone https://github.com/mbu3no/mycash.git
 cd mycash
 ```
 

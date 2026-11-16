@@ -63,7 +63,7 @@ Plataforma de gestão financeira pessoal com sincronização automática de cont
 
 1. **Clone o repositório**
    ```bash
-   git clone https://github.com/bernardoguerraa/mycash.git
+   git clone https://github.com/mbu3no/mycash.git
    cd mycash
    ```
 
