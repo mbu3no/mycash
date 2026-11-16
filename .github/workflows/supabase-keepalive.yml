@@ -52,6 +52,49 @@ jobs:
           fi
           exit 0
 
+      # O token de acesso tem prazo de validade, e o passo de restore abaixo so
+      # roda quando o projeto ja pausou. Sem esta verificacao, um token expirado
+      # passaria meses despercebido e a rede de seguranca so seria descoberta
+      # quebrada no dia em que fosse necessaria.
+      #
+      # Aqui a checagem e diaria e barulhenta: uma leitura inofensiva no proprio
+      # projeto, e o job falha se a credencial nao servir mais. O token nunca e
+      # impresso — so o codigo HTTP da resposta.
+      - name: Verificar validade do token de acesso
+        run: |
+          set -e
+          if [ -z "${{ secrets.SUPABASE_ACCESS_TOKEN }}" ]; then
+            echo "SUPABASE_ACCESS_TOKEN nao configurado; auto-restore indisponivel."
+            echo "A consulta diaria acima nao depende dele e continua funcionando."
+            exit 0
+          fi
+
+          code=$(curl -s -o /dev/null -w "%{http_code}" -m 30 \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ACCESS_TOKEN }}" \
+            "https://api.supabase.com/v1/projects/${PROJECT_REF}")
+
+          echo "GET /v1/projects/${PROJECT_REF} -> HTTP $code"
+
+          case "$code" in
+            200)
+              echo "Token valido e com acesso ao projeto."
+              ;;
+            401)
+              echo "::error::Token invalido ou expirado. Gere outro em"
+              echo "::error::supabase.com/dashboard/account/tokens e atualize o secret."
+              exit 1
+              ;;
+            403)
+              echo "::error::Token autentica mas nao alcanca este projeto."
+              echo "::error::Confira o escopo: precisa de Project Settings com escrita em ${PROJECT_REF}."
+              exit 1
+              ;;
+            *)
+              echo "::error::Resposta inesperada (HTTP $code) ao validar o token."
+              exit 1
+              ;;
+          esac
+
       - name: Tentar restaurar via Management API (opcional)
         if: steps.check.outputs.status == 'paused'
         run: |
