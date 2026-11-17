@@ -89,6 +89,24 @@ export async function syncPluggyItem(
       dateFrom: options.since?.toISOString().slice(0, 10),
     })
 
+    // Quais transacoes desta conta o banco ja conhece.
+    //
+    // Sem esta consulta nao da para saber se o upsert abaixo inseriu ou
+    // atualizou: `upsert().select().single()` devolve a linha nos dois casos.
+    // A versao anterior tratava todo retorno como insercao nova, e o efeito
+    // nao era so um contador errado — `applyTransactionRules` reaplicava as
+    // regras a cada sincronizacao, aportando de novo nas mesmas metas. Duas
+    // passadas levaram tres metas a 100% e as marcaram como concluidas.
+    const { data: linhasConhecidas } = await db
+      .from('transacoes')
+      .select('pluggy_tx_id')
+      .eq('id_conta', conta.id_conta)
+      .not('pluggy_tx_id', 'is', null)
+
+    const idsConhecidos = new Set(
+      (linhasConhecidas ?? []).map((l) => l.pluggy_tx_id).filter(Boolean) as string[]
+    )
+
     {
       for (const tx of transacoesDaConta) {
         totalTx++
@@ -117,9 +135,14 @@ export async function syncPluggyItem(
           continue
         }
 
-        // Se foi insert novo (não update), aplica regras
-        if (inserted) {
+        // As regras de negocio (aporte em meta, baixa em lembrete, alerta)
+        // tem efeito colateral e nao sao idempotentes: so podem rodar quando
+        // a transacao e de fato nova.
+        if (!idsConhecidos.has(tx.id) && inserted) {
           novosTx++
+          // Marca antes de aplicar: se a Pluggy repetir o mesmo id dentro da
+          // mesma varredura, a regra nao roda duas vezes.
+          idsConhecidos.add(tx.id)
           await applyTransactionRules(db, inserted, idUsuario)
         }
       }
