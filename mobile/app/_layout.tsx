@@ -8,6 +8,7 @@ import 'react-native-reanimated';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { NotificacoesProvider } from '@/lib/notificacoes-contexto';
 import { TemaProvider, useTema } from '@/lib/tema';
+import AvisoDeVersao from '@/components/ui/aviso-de-versao';
 
 export const unstable_settings = {
   anchor: '(tabs)',
@@ -53,6 +54,10 @@ function Gate() {
         <Stack.Screen name="login" />
         <Stack.Screen name="(tabs)" />
       </Stack>
+      {/* Fora do Stack, para cobrir qualquer rota: o bloqueio por versao
+          precisa valer tambem na tela de login, que e onde um aplicativo
+          defasado costuma parar primeiro. */}
+      <AvisoDeVersao />
       {/* A barra de status inverte junto com o tema. */}
       <StatusBar style={escuro ? 'light' : 'dark'} />
     </ThemeProvider>

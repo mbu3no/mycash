@@ -18,6 +18,7 @@
  * localhost.
  */
 
+import Constants from 'expo-constants';
 import { supabase } from './supabase';
 import type {
   Conta,
@@ -35,6 +36,28 @@ import type {
 } from '@/types/database';
 
 const BASE = process.env.EXPO_PUBLIC_API_URL ?? 'https://mycash-nu.vercel.app';
+
+/**
+ * Versao instalada, lida do app.json pelo Expo.
+ *
+ * Vai em todo pedido para que a API saiba com quem esta falando. O navegador
+ * nao manda este cabecalho — e nao precisa, porque o web e servido pelo mesmo
+ * deploy da API e nunca esta defasado. Ausencia do cabecalho significa "nao e
+ * o aplicativo" e passa sem barreira.
+ */
+export const VERSAO_DO_APP: string =
+  (Constants.expoConfig?.version as string | undefined) ?? '0.0.0';
+
+/** Lancado quando a API recusa a versao instalada (HTTP 426). */
+export class VersaoNaoSuportadaError extends Error {
+  constructor(
+    public readonly minimaSuportada: string,
+    public readonly loja: { android: string; ios: string }
+  ) {
+    super('Esta versão do aplicativo não é mais suportada.');
+    this.name = 'VersaoNaoSuportadaError';
+  }
+}
 
 export class ApiError extends Error {
   constructor(
@@ -96,12 +119,24 @@ async function apiFetch<T>(caminho: string, init: RequestInit = {}): Promise<T> 
         Accept: 'application/json',
         'Cache-Control': 'no-cache',
         Authorization: `Bearer ${token}`,
+        'X-MyCash-App-Version': VERSAO_DO_APP,
         ...init.headers,
       },
     });
   } catch {
     // fetch so rejeita por falha de rede — vale avisar o usuario disso.
     throw new ApiError('Sem conexão com o servidor. Verifique a internet.', 0);
+  }
+
+  // 426 Upgrade Required: a API deixou de atender esta versao. Vira um erro
+  // proprio para que a interface possa bloquear em vez de mostrar "erro
+  // inesperado" numa tela que nunca mais vai funcionar.
+  if (resposta.status === 426) {
+    const detalhe = await resposta.json().catch(() => null);
+    throw new VersaoNaoSuportadaError(
+      detalhe?.minimaSuportada ?? '',
+      detalhe?.loja ?? { android: '', ios: '' }
+    );
   }
 
   // 204 (DELETE) nao tem corpo.

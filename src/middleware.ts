@@ -1,7 +1,25 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
+import { barreiraDeVersao } from '@/lib/api/barreira-de-versao'
+
 export async function middleware(request: NextRequest) {
+  // As rotas de API cuidam da propria autenticacao — por cookie no navegador
+  // e por Bearer no aplicativo. Aqui elas passam apenas pela barreira de
+  // versao, e o trabalho de renovar sessao nao roda a toa.
+  //
+  // /api/config/app-version fica de fora da barreira de proposito: e a rota
+  // que informa ao aplicativo bloqueado para onde ir. Barra-la criaria um
+  // impasse em que o cliente desatualizado nao consegue nem descobrir que
+  // precisa atualizar.
+  if (request.nextUrl.pathname.startsWith('/api/')) {
+    if (request.nextUrl.pathname !== '/api/config/app-version') {
+      const barrada = barreiraDeVersao(request)
+      if (barrada) return barrada
+    }
+    return NextResponse.next({ request })
+  }
+
   let supabaseResponse = NextResponse.next({
     request,
   })
@@ -73,5 +91,6 @@ export const config = {
     '/login',
     '/registro',
     '/recuperar-senha',
+    '/api/:path*',
   ],
 }
