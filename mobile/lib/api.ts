@@ -18,7 +18,7 @@
  * localhost.
  */
 
-import Constants from 'expo-constants';
+import appJson from '../app.json';
 import { supabase } from './supabase';
 import type {
   Conta,
@@ -45,8 +45,7 @@ const BASE = process.env.EXPO_PUBLIC_API_URL ?? 'https://mycash-nu.vercel.app';
  * deploy da API e nunca esta defasado. Ausencia do cabecalho significa "nao e
  * o aplicativo" e passa sem barreira.
  */
-export const VERSAO_DO_APP: string =
-  (Constants.expoConfig?.version as string | undefined) ?? '0.0.0';
+export const VERSAO_DO_APP: string = appJson.expo.version ?? '0.0.0';
 
 /** Lancado quando a API recusa a versao instalada (HTTP 426). */
 export class VersaoNaoSuportadaError extends Error {
