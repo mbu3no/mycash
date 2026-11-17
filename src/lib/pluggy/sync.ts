@@ -73,17 +73,24 @@ export async function syncPluggyItem(
 
     await applyBalanceAlert(db, idUsuario, conta.id_conta, acc.balance, item.connector.name)
 
-    // Busca transações (paginação)
-    let page = 1
-    const pageSize = 500
-    while (true) {
-      const txResp = await pluggy.fetchTransactions(acc.id, {
-        from: options.since?.toISOString().slice(0, 10),
-        pageSize,
-        page,
-      })
+    // Busca transações.
+    //
+    // `fetchAllTransactions` percorre o endpoint /v2/transactions com
+    // paginação por cursor e devolve a lista completa. A versão anterior
+    // chamava `fetchTransactions`, que usa o /v1 — a Pluggy removeu esse
+    // endpoint e ele passou a responder 410 Gone, derrubando a sincronização
+    // inteira com "ENDPOINT_DEPRECATED". O laço manual de páginas some junto:
+    // o cursor fica por conta do SDK.
+    //
+    // O limite de 10 mil transações que existia aqui como rede de segurança
+    // deixou de ser necessário: o varrimento por cursor é estável em listas
+    // longas, que era justamente o motivo da deprecação.
+    const transacoesDaConta = await pluggy.fetchAllTransactions(acc.id, {
+      dateFrom: options.since?.toISOString().slice(0, 10),
+    })
 
-      for (const tx of txResp.results) {
+    {
+      for (const tx of transacoesDaConta) {
         totalTx++
 
         // upsert idempotente
@@ -116,10 +123,6 @@ export async function syncPluggyItem(
           await applyTransactionRules(db, inserted, idUsuario)
         }
       }
-
-      if (txResp.results.length < pageSize) break
-      page++
-      if (page > 20) break // safety: max 10k tx por sync
     }
   }
 
