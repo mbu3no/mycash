@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/service'
 import { syncPluggyItem } from '@/lib/pluggy/sync'
+import { conferirAssinatura, deveRecusar, extrairAssinatura } from '@/lib/pluggy/assinatura'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -21,11 +22,34 @@ interface PluggyWebhookEvent {
  *   - transactions/created, transactions/updated, transactions/deleted
  *   - connector/status_updated
  *
- * Validação: Pluggy envia X-Pluggy-Signature (HMAC SHA-256 do body com client_secret).
- * No sandbox pode estar ausente; em prod SEMPRE validar.
+ * Autenticidade: a Pluggy assina o corpo com HMAC SHA-256 usando o
+ * clientSecret e envia o resultado em X-Pluggy-Signature. Assinatura presente
+ * e errada recusa sempre. Assinatura ausente depende de
+ * PLUGGY_WEBHOOK_ESTRITO, porque o sandbox nem sempre assina — ver
+ * src/lib/pluggy/assinatura.ts.
  */
 export async function POST(req: NextRequest) {
   const raw = await req.text()
+
+  // A conferencia vem antes de ler o corpo como JSON e antes de qualquer
+  // escrita: requisicao nao autentica nao deve sequer virar linha de log.
+  const resultado = conferirAssinatura(
+    raw,
+    extrairAssinatura(req.headers),
+    process.env.PLUGGY_CLIENT_SECRET
+  )
+
+  if (deveRecusar(resultado, process.env.PLUGGY_WEBHOOK_ESTRITO === 'true')) {
+    console.warn(`Pluggy webhook recusado: ${resultado.motivo}`)
+    return NextResponse.json({ error: 'assinatura invalida' }, { status: 401 })
+  }
+
+  if (!resultado.valida) {
+    // Aceito, mas registrado: em producao com dados reais isto deveria ser
+    // recusa, e o aviso existe para que a lacuna nao passe despercebida.
+    console.warn(`Pluggy webhook aceito sem assinatura valida: ${resultado.motivo}`)
+  }
+
   let event: PluggyWebhookEvent
   try {
     event = JSON.parse(raw) as PluggyWebhookEvent

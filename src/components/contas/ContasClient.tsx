@@ -16,6 +16,7 @@ import { api } from '@/lib/api/client'
 import { Database } from '@/types/database'
 import ContaModal from './ContaModal'
 import PluggyConnectButton from './PluggyConnectButton'
+import SincronizarButton from './SincronizarButton'
 
 type ContaBancaria = Database['public']['Tables']['contas_bancarias']['Row']
 
@@ -113,6 +114,9 @@ export default function ContasClient({ contas: initialContas }: ContasClientProp
         </div>
         <div className="flex flex-wrap gap-2">
           <PluggyConnectButton onConnected={() => window.location.reload()} />
+          {contas.some((c) => c.origem === 'pluggy') && (
+            <SincronizarButton aoConcluir={() => window.location.reload()} />
+          )}
           <button
             onClick={handleNew}
             className="btn-secondary inline-flex items-center gap-2 focus:ring-2 focus:ring-emerald-500/20 focus:ring-offset-2 focus:ring-offset-surface-0"

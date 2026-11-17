@@ -7,6 +7,33 @@ import { syncPluggyItem } from '@/lib/pluggy/sync'
 export const runtime = 'nodejs'
 
 /** Callback do widget: recebe itemId criado, persiste conexão e faz 1º sync. */
+/**
+ * Lista as conexoes Open Finance do usuario.
+ *
+ * Usa o cliente com a sessao do usuario, e nao o service role: a RLS de
+ * `pluggy_connections` ja filtra por dono, entao nao ha o que conferir aqui
+ * a mao. Existe para a interface saber quais conexoes sincronizar — antes
+ * disso, a rota de sincronizacao existia mas nao havia como descobrir o id
+ * para chama-la.
+ */
+export async function GET(req: NextRequest) {
+  const supabase = createClientFromRequest(req)
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) return NextResponse.json({ error: 'não autenticado' }, { status: 401 })
+
+  const { data, error } = await supabase
+    .from('pluggy_connections')
+    .select('id, institution_name, status, execution_status, last_updated_at')
+    .order('id', { ascending: true })
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+  return NextResponse.json({ data: data ?? [] })
+}
+
 export async function POST(req: NextRequest) {
   const supabase = createClientFromRequest(req)
   const {
