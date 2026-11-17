@@ -1,0 +1,31 @@
+# Configuração do linter de contrato da API.
+#
+# As regras desligadas aqui não são ruído ignorado por conveniência: cada uma
+# descreve uma prática que não se aplica a este projeto, e a justificativa
+# fica registrada para quem reabrir isto depois.
+
+apis:
+  mycash:
+    root: docs/api/openapi.yaml
+
+extends:
+  - recommended
+
+rules:
+  # O servidor de desenvolvimento aponta para localhost de propósito. A regra
+  # existe para pegar especificação publicada com endereço de exemplo
+  # esquecido; aqui o endereço de produção é o primeiro da lista, e o local
+  # está declarado como tal.
+  no-server-example.com: off
+
+  # Três rotas sempre respondem 200: /health e /config/app-version são sondas
+  # públicas, e o GET de /pluggy/webhook só confirma que o endpoint existe.
+  # Declarar um 4XX fictício nelas seria documentar comportamento que não
+  # acontece — pior que a ausência, porque o cliente trataria um caso
+  # impossível.
+  operation-4xx-response: off
+
+  # Erros são descritos por $ref em components/responses, compartilhados entre
+  # as operações. O padrão de problema (RFC 9457) seria o passo seguinte, mas
+  # mudaria o formato que os dois clientes já consomem.
+  no-invalid-media-type-examples: warn

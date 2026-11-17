@@ -1,0 +1,1276 @@
+# =============================================================================
+# MyCash — especificação da API REST
+#
+# Este documento é contrato, não manual. Ele declara as obrigações recíprocas
+# entre quem produz a API (as rotas em src/app/api) e quem a consome: a
+# aplicação web e o aplicativo móvel.
+#
+# A distinção importa porque o projeto já pagou por não tê-la. Em 28/08/2026 o
+# aplicativo quebrou com "Cannot read property 'length' of undefined" ao
+# esperar um campo que a API ainda não servia. Não havia documento onde
+# consultar quais campos eram garantidos e quais eram opcionais — a resposta
+# vivia no código de quem implementou.
+#
+# Versão 3.1.0, e não 3.2.0, por decisão prática: 3.1 é a primeira a convergir
+# com JSON Schema 2020-12, que é o ponto que importa aqui, e é a que as
+# ferramentas de renderização e validação suportam de forma estável hoje.
+#
+# Validar:   npm run api:validar
+# Renderizar: /api-docs na aplicação
+# =============================================================================
+openapi: 3.1.0
+
+info:
+  title: MyCash API
+  version: 1.0.0
+  summary: Gestão financeira pessoal com integração ao Open Finance brasileiro.
+  description: |
+    API REST consumida pela aplicação web (Next.js) e pelo aplicativo móvel
+    (React Native/Expo). Ambos os clientes falam exclusivamente com estas
+    rotas — nenhum acessa o banco de dados diretamente.
+
+    ## Autenticação
+
+    Dois mecanismos, equivalentes em efeito:
+
+    - **Cookie de sessão** — usado pelo navegador, gerenciado pelo middleware.
+    - **`Authorization: Bearer <access_token>`** — usado pelo aplicativo, que
+      não tem cookie.
+
+    O token vem do Supabase Auth. O isolamento entre usuários não depende
+    desta camada: as tabelas têm Row Level Security, então mesmo uma falha
+    aqui não expõe dados de terceiros.
+
+    ## Formato das respostas
+
+    Sucesso devolve `{ "data": ... }`. Falha devolve `{ "error": "mensagem" }`.
+    O envelope é uniforme para que o cliente tenha um único ponto de
+    tratamento.
+
+    ## Compatibilidade de versão
+
+    O aplicativo se identifica pelo cabeçalho `X-MyCash-App-Version`. Versões
+    abaixo da mínima suportada recebem `426 Upgrade Required`. O navegador não
+    envia o cabeçalho e nunca é barrado — é servido pelo mesmo deploy da API.
+  contact:
+    name: Grupo 9 — ADS IV, UNIFEI Itabira
+    url: https://github.com/mbu3no/mycash
+  license:
+    name: Uso acadêmico
+    identifier: LicenseRef-Academico
+
+servers:
+  - url: https://mycash-nu.vercel.app/api
+    description: Produção
+  - url: http://localhost:3000/api
+    description: Desenvolvimento local
+
+tags:
+  - name: Transações
+    description: Movimentações financeiras. O lançamento ajusta o saldo da conta.
+  - name: Contas
+    description: Contas bancárias, manuais ou sincronizadas via Open Finance.
+  - name: Metas
+    description: Objetivos de poupança com prazo e progresso.
+  - name: Lembretes
+    description: Contas a pagar e a receber com data de vencimento.
+  - name: Notificações
+    description: Eventos do sistema dirigidos ao usuário.
+  - name: Perfil
+    description: Dados cadastrais do usuário autenticado.
+  - name: Resumo
+    description: Agregações para o painel principal.
+  - name: Open Finance
+    description: Integração com a Pluggy para sincronização bancária.
+  - name: Operação
+    description: Sondas e metadados consumidos por infraestrutura e pelo app.
+
+security:
+  - CookieDeSessao: []
+  - TokenBearer: []
+
+# =============================================================================
+paths:
+  # --------------------------------------------------------------- Transações
+  /transacoes:
+    get:
+      operationId: getTransacoes
+      tags: [Transações]
+      summary: Lista transações do usuário
+      description: |
+        O recorte por período é aplicado no banco, onde há índice. Tipo e
+        categoria também filtram no servidor para que o aplicativo não precise
+        baixar o que não vai exibir.
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+        - name: id_conta
+          in: query
+          schema: { type: integer }
+          description: Restringe a uma conta.
+        - name: tipo
+          in: query
+          schema: { $ref: '#/components/schemas/TipoTransacao' }
+        - name: de
+          in: query
+          schema: { type: string, format: date }
+          description: Data inicial, inclusive.
+        - name: ate
+          in: query
+          schema: { type: string, format: date }
+          description: Data final, inclusive.
+        - name: limit
+          in: query
+          schema: { type: integer, default: 200, maximum: 500 }
+          description: Teto de 500 aplicado no servidor, independente do valor pedido.
+      responses:
+        '200':
+          description: Lista de transações.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Transacao' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '426': { $ref: '#/components/responses/VersaoNaoSuportada' }
+        '500': { $ref: '#/components/responses/ErroInterno' }
+    post:
+      operationId: postTransacoes
+      tags: [Transações]
+      summary: Registra uma transação
+      description: |
+        Além de inserir a linha, ajusta o saldo da conta pelo efeito do
+        lançamento: entrada soma, saída subtrai, sempre pelo módulo do valor.
+        Conta de usuário bloqueado ou inativo recusa o lançamento.
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransacaoEntrada' }
+      responses:
+        '201':
+          description: Transação criada.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Transacao' }
+        '400': { $ref: '#/components/responses/RequisicaoInvalida' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '426': { $ref: '#/components/responses/VersaoNaoSuportada' }
+
+  /transacoes/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/IdNaRota' }
+      - { $ref: '#/components/parameters/VersaoDoApp' }
+    get:
+      operationId: getTransacoesPorId
+      tags: [Transações]
+      summary: Detalha uma transação
+      responses:
+        '200':
+          description: Transação encontrada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Transacao' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+    patch:
+      operationId: patchTransacoesPorId
+      tags: [Transações]
+      summary: Edita uma transação
+      description: |
+        O saldo é ajustado pela diferença, não recalculado do zero. Alterar
+        apenas a descrição não move o saldo; trocar o tipo inverte o efeito.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransacaoEdicao' }
+      responses:
+        '200':
+          description: Transação atualizada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Transacao' }
+        '400': { $ref: '#/components/responses/RequisicaoInvalida' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+    delete:
+      operationId: deleteTransacoesPorId
+      tags: [Transações]
+      summary: Remove uma transação
+      description: Devolve o valor ao saldo. Chamar duas vezes não devolve em dobro.
+      responses:
+        '204': { description: Removida. }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+
+  # ------------------------------------------------------------------ Contas
+  /contas:
+    get:
+      operationId: getContas
+      tags: [Contas]
+      summary: Lista contas bancárias
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      responses:
+        '200':
+          description: Contas do usuário.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Conta' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+    post:
+      operationId: postContas
+      tags: [Contas]
+      summary: Cadastra uma conta manual
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContaEntrada' }
+      responses:
+        '201':
+          description: Conta criada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Conta' }
+        '400': { $ref: '#/components/responses/RequisicaoInvalida' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+
+  /contas/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/IdNaRota' }
+      - { $ref: '#/components/parameters/VersaoDoApp' }
+    get:
+      operationId: getContasPorId
+      tags: [Contas]
+      summary: Detalha uma conta
+      responses:
+        '200':
+          description: Conta encontrada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Conta' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+    patch:
+      operationId: patchContasPorId
+      tags: [Contas]
+      summary: Edita uma conta
+      responses:
+        '200':
+          description: Conta atualizada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Conta' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContaEntrada' }
+    delete:
+      operationId: deleteContasPorId
+      tags: [Contas]
+      summary: Remove uma conta
+      description: |
+        Remove em cascata as transações da conta. Comportamento garantido pelo
+        banco (`on delete cascade`), não pela aplicação.
+      responses:
+        '204': { description: Removida. }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+
+  # ------------------------------------------------------------------- Metas
+  /metas:
+    get:
+      operationId: getMetas
+      tags: [Metas]
+      summary: Lista metas financeiras
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/StatusMeta' }
+      responses:
+        '200':
+          description: Metas do usuário.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Meta' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+    post:
+      operationId: postMetas
+      tags: [Metas]
+      summary: Cria uma meta
+      description: Data limite anterior à data de início é recusada pelo banco.
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MetaEntrada' }
+      responses:
+        '201':
+          description: Meta criada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Meta' }
+        '400': { $ref: '#/components/responses/RequisicaoInvalida' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+
+  /metas/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/IdNaRota' }
+      - { $ref: '#/components/parameters/VersaoDoApp' }
+    get:
+      operationId: getMetasPorId
+      tags: [Metas]
+      summary: Detalha uma meta
+      responses:
+        '200':
+          description: Meta encontrada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Meta' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+    patch:
+      operationId: patchMetasPorId
+      tags: [Metas]
+      summary: Edita uma meta ou registra aporte
+      description: |
+        Aporte que excederia o objetivo é limitado ao objetivo, e a meta passa
+        a `Concluida`. Meta já concluída não recebe novos aportes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MetaEdicao' }
+      responses:
+        '200':
+          description: Meta atualizada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Meta' }
+        '400': { $ref: '#/components/responses/RequisicaoInvalida' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+    delete:
+      operationId: deleteMetasPorId
+      tags: [Metas]
+      summary: Remove uma meta
+      responses:
+        '204': { description: Removida. }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+
+  # --------------------------------------------------------------- Lembretes
+  /lembretes:
+    get:
+      operationId: getLembretes
+      tags: [Lembretes]
+      summary: Lista lembretes
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+        - name: ativo
+          in: query
+          schema: { type: boolean }
+        - name: tipo
+          in: query
+          schema: { $ref: '#/components/schemas/TipoLembrete' }
+      responses:
+        '200':
+          description: Lembretes do usuário.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Lembrete' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+    post:
+      operationId: postLembretes
+      tags: [Lembretes]
+      summary: Cria um lembrete
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LembreteEntrada' }
+      responses:
+        '201':
+          description: Lembrete criado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Lembrete' }
+        '400': { $ref: '#/components/responses/RequisicaoInvalida' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+
+  /lembretes/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/IdNaRota' }
+      - { $ref: '#/components/parameters/VersaoDoApp' }
+    get:
+      operationId: getLembretesPorId
+      tags: [Lembretes]
+      summary: Detalha um lembrete
+      responses:
+        '200':
+          description: Lembrete encontrado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Lembrete' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+    patch:
+      operationId: patchLembretesPorId
+      tags: [Lembretes]
+      summary: Edita um lembrete ou alterna o estado ativo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LembreteEntrada' }
+      responses:
+        '200':
+          description: Lembrete atualizado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Lembrete' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+    delete:
+      operationId: deleteLembretesPorId
+      tags: [Lembretes]
+      summary: Remove um lembrete
+      responses:
+        '204': { description: Removido. }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+
+  # ------------------------------------------------------------ Notificações
+  /notificacoes:
+    get:
+      operationId: getNotificacoes
+      tags: [Notificações]
+      summary: Lista notificações
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+        - name: lida
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: Notificações do usuário.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Notificacao' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+    post:
+      operationId: postNotificacoes
+      tags: [Notificações]
+      summary: Cria uma notificação
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificacaoEntrada' }
+      responses:
+        '201':
+          description: Notificação criada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Notificacao' }
+        '400': { $ref: '#/components/responses/RequisicaoInvalida' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+
+  /notificacoes/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/IdNaRota' }
+      - { $ref: '#/components/parameters/VersaoDoApp' }
+    get:
+      operationId: getNotificacoesPorId
+      tags: [Notificações]
+      summary: Detalha uma notificação
+      responses:
+        '200':
+          description: Notificação encontrada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Notificacao' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+    patch:
+      operationId: patchNotificacoesPorId
+      tags: [Notificações]
+      summary: Marca como lida ou não lida
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                lida: { type: boolean }
+      responses:
+        '200':
+          description: Notificação atualizada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Notificacao' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+    delete:
+      operationId: deleteNotificacoesPorId
+      tags: [Notificações]
+      summary: Remove uma notificação
+      responses:
+        '204': { description: Removida. }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+
+  # ------------------------------------------------------------------ Perfil
+  /perfil:
+    get:
+      operationId: getPerfil
+      tags: [Perfil]
+      summary: Dados do usuário autenticado
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      responses:
+        '200':
+          description: Perfil do usuário.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Perfil' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+    patch:
+      operationId: patchPerfil
+      tags: [Perfil]
+      summary: Atualiza o nome cadastrado
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nome_completo]
+              properties:
+                nome_completo:
+                  type: string
+                  minLength: 1
+                  description: Espaços nas bordas são removidos; só espaços é recusado.
+      responses:
+        '200':
+          description: Perfil atualizado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Perfil' }
+        '400': { $ref: '#/components/responses/RequisicaoInvalida' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+
+  # ------------------------------------------------------------------ Resumo
+  /dashboard:
+    get:
+      operationId: getDashboard
+      tags: [Resumo]
+      summary: Resumo consolidado do painel
+      description: |
+        Uma requisição entrega o que o painel precisa, com as agregações feitas
+        no banco. O aplicativo antes buscava contas, transações, metas e
+        lembretes em paralelo e recortava o mês no aparelho.
+
+        **Campos obrigatórios** — o cliente trava sem eles: `saldoTotal`,
+        `entradas`, `saidas`, `metasAtivas`.
+
+        **Campos tolerantes** — o cliente funciona sem eles, mostrando menos:
+        `serieMensal`, `recentes`, `proximosLembretes`, `nome`. Esta
+        classificação não é decorativa: foi o que permitiu ao aplicativo
+        sobreviver ao incidente de 28/08, lendo com `?? []`.
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      responses:
+        '200':
+          description: Resumo do painel.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ResumoDashboard' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+
+  # ------------------------------------------------------------ Open Finance
+  /pluggy/connect-token:
+    post:
+      operationId: postPluggyConnectToken
+      tags: [Open Finance]
+      summary: Gera token para o widget de consentimento
+      description: |
+        O `clientUserId` vem da sessão autenticada, nunca do corpo da
+        requisição — caso contrário qualquer um poderia gerar token em nome de
+        outro usuário.
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                itemId:
+                  type: string
+                  description: Presente apenas ao reconectar um item existente.
+      responses:
+        '200':
+          description: Token de conexão.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accessToken]
+                properties:
+                  accessToken: { type: string }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '500': { $ref: '#/components/responses/ErroInterno' }
+
+  /pluggy/connections:
+    get:
+      operationId: getPluggyConnections
+      tags: [Open Finance]
+      summary: Lista conexões Open Finance do usuário
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      responses:
+        '200':
+          description: Conexões ativas.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ConexaoOpenFinance' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+    post:
+      operationId: postPluggyConnections
+      tags: [Open Finance]
+      summary: Registra a conexão e sincroniza pela primeira vez
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [itemId]
+              properties:
+                itemId: { type: string }
+      responses:
+        '200':
+          description: Conexão registrada e sincronizada.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResultadoSincronizacao' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '500': { $ref: '#/components/responses/ErroInterno' }
+    delete:
+      operationId: deletePluggyConnections
+      tags: [Open Finance]
+      summary: Desconecta um banco
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+        - name: id
+          in: query
+          required: true
+          schema: { type: integer }
+      responses:
+        '204': { description: Desconectado. }
+        '400': { $ref: '#/components/responses/RequisicaoInvalida' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+
+  /pluggy/sync/{connectionId}:
+    post:
+      operationId: postPluggySyncPorConnectionid
+      tags: [Open Finance]
+      summary: Sincroniza uma conexão sob demanda
+      description: |
+        Idempotente: a restrição `unique` em `pluggy_tx_id` impede linhas
+        duplicadas, e as regras de negócio só são aplicadas a transações que
+        ainda não existiam. Sincronizar duas vezes não aporta duas vezes nas
+        metas.
+      parameters:
+        - name: connectionId
+          in: path
+          required: true
+          schema: { type: integer }
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      responses:
+        '200':
+          description: Sincronização concluída.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResultadoSincronizacao' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+        '500': { $ref: '#/components/responses/ErroInterno' }
+
+  /pluggy/webhook:
+    post:
+      operationId: postPluggyWebhook
+      tags: [Open Finance]
+      summary: Recebe eventos da Pluggy
+      description: |
+        Chamada pela Pluggy, não pelos clientes. O corpo é autenticado por HMAC
+        SHA-256 no cabeçalho `X-Pluggy-Signature`; assinatura presente e
+        inválida é recusada com 401.
+
+        O registro em `pluggy_webhook_events` tem `event_id` único, então
+        evento reentregue não é processado duas vezes.
+      security: []
+      parameters:
+        - name: X-Pluggy-Signature
+          in: header
+          schema: { type: string }
+          description: HMAC SHA-256 do corpo cru, com o clientSecret como chave.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EventoPluggy' }
+      responses:
+        '200':
+          description: Evento aceito.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  duplicate: { type: boolean }
+        '400': { description: Corpo não é JSON válido. }
+        '401': { description: Assinatura inválida. }
+    get:
+      operationId: getPluggyWebhook
+      tags: [Open Finance]
+      summary: Verificação de disponibilidade do webhook
+      security: []
+      responses:
+        '200': { description: Endpoint ativo. }
+
+  # ---------------------------------------------------------------- Operação
+  /health:
+    get:
+      operationId: getHealth
+      tags: [Operação]
+      summary: Sonda de liveness
+      description: |
+        Responde se o processo subiu e aceita requisição HTTP. Deliberadamente
+        não toca no banco: sonda que depende de serviço externo transforma
+        indisponibilidade de terceiro em reinício em laço.
+      security: []
+      responses:
+        '200':
+          description: Processo ativo.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ok }
+                  uptime: { type: integer, description: Segundos desde a inicialização. }
+                  timestamp: { type: string, format: date-time }
+
+  /openapi:
+    get:
+      operationId: getOpenapi
+      tags: [Operação]
+      summary: Especificação OpenAPI desta API
+      description: |
+        Serve o próprio contrato, para que ele seja alcançável por máquina e
+        não apenas por quem tem o repositório aberto. Consumido por geradores
+        de cliente tipado e pela página /api-docs.
+      security: []
+      responses:
+        '200':
+          description: Documento OpenAPI em YAML.
+          content:
+            application/yaml:
+              schema: { type: string }
+        '500':
+          description: Especificação indisponível.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erro' }
+
+  /config/app-version:
+    get:
+      operationId: getConfigAppVersion
+      tags: [Operação]
+      summary: Política de compatibilidade do aplicativo
+      description: |
+        Consultada pelo aplicativo na abertura. Pública e nunca barrada pela
+        própria verificação de versão — do contrário, o cliente bloqueado não
+        conseguiria descobrir que precisa atualizar.
+      security: []
+      parameters:
+        - { $ref: '#/components/parameters/VersaoDoApp' }
+      responses:
+        '200':
+          description: Política vigente.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PoliticaDeVersao' }
+
+# =============================================================================
+components:
+  securitySchemes:
+    CookieDeSessao:
+      type: apiKey
+      in: cookie
+      name: sb-access-token
+      description: Cookie emitido pelo Supabase Auth, usado pelo navegador.
+    TokenBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token do Supabase Auth, usado pelo aplicativo móvel.
+
+  parameters:
+    IdNaRota:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+    VersaoDoApp:
+      name: X-MyCash-App-Version
+      in: header
+      required: false
+      schema: { type: string, pattern: '^\d+\.\d+\.\d+$' }
+      description: |
+        Versão instalada do aplicativo. O navegador não envia e nunca é
+        barrado. Versões abaixo da mínima recebem 426.
+      example: 1.0.0
+
+  responses:
+    NaoAutenticado:
+      description: Sessão ausente ou inválida.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erro' }
+    NaoEncontrado:
+      description: |
+        Recurso inexistente — ou pertencente a outro usuário. A Row Level
+        Security não distingue os dois casos de propósito: responder
+        "existe, mas não é seu" já vazaria informação.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erro' }
+    RequisicaoInvalida:
+      description: Corpo ausente ou campo obrigatório faltando.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erro' }
+    VersaoNaoSuportada:
+      description: |
+        Versão do aplicativo abaixo da mínima suportada. A barreira existe no
+        servidor porque a tela de bloqueio do aplicativo não impede requisição
+        forjada.
+      headers:
+        Upgrade:
+          schema: { type: string }
+          example: mycash-app/1.0.0
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Erro'
+              - type: object
+                properties:
+                  versaoRecebida: { type: string }
+                  minimaSuportada: { type: string }
+                  maisRecente: { type: string }
+    ErroInterno:
+      description: Falha não tratada.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erro' }
+
+  schemas:
+    # ----- Enumerações (espelham os tipos do PostgreSQL) -----
+    TipoTransacao:
+      type: string
+      enum: [Entrada, Saida]
+    StatusConta:
+      type: string
+      enum: [Ativo, Inativo, Bloqueado]
+      description: Conta de usuário não-Ativo recusa lançamentos.
+    StatusMeta:
+      type: string
+      enum: [EmAndamento, Concluida, Cancelada]
+    TipoLembrete:
+      type: string
+      enum: [ContaPagar, ContaReceber]
+    TipoNotificacao:
+      type: string
+      enum: [Sistema, Meta, Lembrete, Alerta]
+    OrigemDoRegistro:
+      type: string
+      enum: [manual, pluggy]
+      description: Distingue o que o usuário digitou do que veio do Open Finance.
+
+    Erro:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    # ----- Recursos -----
+    Transacao:
+      type: object
+      required: [id_transacao, id_conta, data_transacao, tipo, valor]
+      properties:
+        id_transacao: { type: integer }
+        id_conta: { type: integer }
+        data_transacao: { type: string, format: date }
+        tipo: { $ref: '#/components/schemas/TipoTransacao' }
+        categoria: { type: string }
+        descricao: { type: string }
+        valor:
+          type: number
+          exclusiveMinimum: 0
+          description: |
+            Sempre positivo. O sinal vem do `tipo`, nunca do número — assim um
+            registro antigo com valor negativo não inverte o efeito no saldo.
+            Armazenado como `numeric(14,2)`.
+        pluggy_tx_id:
+          type: [string, 'null']
+          description: |
+            Identificador na Pluggy. Nulo em lançamento manual. A coluna é
+            `unique`, e o PostgreSQL permite múltiplos nulos — é isso que
+            deixa manual e sincronizado conviverem na mesma tabela.
+        origem: { $ref: '#/components/schemas/OrigemDoRegistro' }
+
+    TransacaoEntrada:
+      type: object
+      required: [id_conta, data_transacao, tipo, categoria, descricao, valor]
+      properties:
+        id_conta: { type: integer }
+        data_transacao: { type: string, format: date }
+        tipo: { $ref: '#/components/schemas/TipoTransacao' }
+        categoria: { type: string, minLength: 1 }
+        descricao: { type: string, minLength: 1 }
+        valor: { type: number, exclusiveMinimum: 0 }
+
+    TransacaoEdicao:
+      type: object
+      description: Campos omitidos permanecem inalterados.
+      properties:
+        id_conta: { type: integer }
+        data_transacao: { type: string, format: date }
+        tipo: { $ref: '#/components/schemas/TipoTransacao' }
+        categoria: { type: string }
+        descricao: { type: string }
+        valor: { type: number, exclusiveMinimum: 0 }
+
+    Conta:
+      type: object
+      required: [id_conta, instituicao, saldo_atual]
+      properties:
+        id_conta: { type: integer }
+        instituicao: { type: string }
+        numero_conta: { type: string }
+        tipo_conta: { type: string, example: Corrente }
+        saldo_atual: { type: number }
+        status_conta: { $ref: '#/components/schemas/StatusConta' }
+        origem: { $ref: '#/components/schemas/OrigemDoRegistro' }
+        ultima_sync: { type: [string, 'null'], format: date-time }
+
+    ContaEntrada:
+      type: object
+      required: [instituicao, numero_conta, tipo_conta, saldo_atual]
+      properties:
+        instituicao: { type: string, minLength: 1 }
+        numero_conta: { type: string, minLength: 1 }
+        tipo_conta: { type: string }
+        saldo_atual: { type: number }
+
+    Meta:
+      type: object
+      required: [id_meta, titulo, valor_objetivo, valor_atual, status]
+      properties:
+        id_meta: { type: integer }
+        titulo: { type: string }
+        valor_objetivo: { type: number, exclusiveMinimum: 0 }
+        valor_atual: { type: number, minimum: 0 }
+        data_inicio: { type: string, format: date }
+        data_limite: { type: string, format: date }
+        status: { $ref: '#/components/schemas/StatusMeta' }
+
+    MetaEntrada:
+      type: object
+      required: [titulo, valor_objetivo, data_inicio, data_limite]
+      properties:
+        titulo: { type: string, minLength: 1 }
+        valor_objetivo: { type: number, exclusiveMinimum: 0 }
+        valor_atual: { type: number, minimum: 0, default: 0 }
+        data_inicio: { type: string, format: date }
+        data_limite:
+          type: string
+          format: date
+          description: Deve ser posterior à data de início; o banco recusa o contrário.
+
+    MetaEdicao:
+      type: object
+      properties:
+        titulo: { type: string }
+        valor_objetivo: { type: number, exclusiveMinimum: 0 }
+        valor_atual: { type: number, minimum: 0 }
+        data_limite: { type: string, format: date }
+        status: { $ref: '#/components/schemas/StatusMeta' }
+        aporte:
+          type: number
+          exclusiveMinimum: 0
+          description: |
+            Soma ao valor atual. Limitado ao objetivo, concluindo a meta ao
+            alcançá-lo. Meta já concluída recusa aporte.
+
+    Lembrete:
+      type: object
+      required: [id_lembrete, descricao, tipo, valor_previsto, data_vencimento, ativo]
+      properties:
+        id_lembrete: { type: integer }
+        descricao: { type: string }
+        tipo: { $ref: '#/components/schemas/TipoLembrete' }
+        valor_previsto: { type: number, minimum: 0 }
+        data_vencimento: { type: string, format: date }
+        ativo: { type: boolean }
+
+    LembreteEntrada:
+      type: object
+      required: [descricao, tipo, valor_previsto, data_vencimento]
+      properties:
+        descricao: { type: string, minLength: 1 }
+        tipo: { $ref: '#/components/schemas/TipoLembrete' }
+        valor_previsto: { type: number, minimum: 0 }
+        data_vencimento: { type: string, format: date }
+        ativo: { type: boolean, default: true }
+
+    Notificacao:
+      type: object
+      required: [id_notificacao, mensagem, tipo, lida]
+      properties:
+        id_notificacao: { type: integer }
+        mensagem: { type: string }
+        tipo: { $ref: '#/components/schemas/TipoNotificacao' }
+        lida: { type: boolean }
+        data_notificacao: { type: string, format: date-time }
+
+    NotificacaoEntrada:
+      type: object
+      required: [mensagem, tipo]
+      properties:
+        mensagem: { type: string, minLength: 1 }
+        tipo: { $ref: '#/components/schemas/TipoNotificacao' }
+
+    Perfil:
+      type: object
+      required: [id_usuario, nome_completo, email]
+      properties:
+        id_usuario: { type: integer }
+        nome_completo: { type: string }
+        email: { type: string, format: email }
+        plano: { type: string, enum: [Free, Premium] }
+        status_conta: { $ref: '#/components/schemas/StatusConta' }
+
+    PontoMensal:
+      type: object
+      required: [mes, ano, entradas, saidas]
+      properties:
+        mes: { type: string, example: Set }
+        ano: { type: integer }
+        entradas: { type: number, minimum: 0 }
+        saidas: { type: number, minimum: 0 }
+
+    ResumoDashboard:
+      type: object
+      required: [saldoTotal, entradas, saidas, metasAtivas]
+      properties:
+        nome: { type: string }
+        saldoTotal: { type: number }
+        entradas: { type: number, minimum: 0 }
+        saidas: { type: number, minimum: 0 }
+        saldoMes: { type: number }
+        metasAtivas: { type: integer, minimum: 0 }
+        serieMensal:
+          type: array
+          maxItems: 6
+          items: { $ref: '#/components/schemas/PontoMensal' }
+          description: |
+            Seis meses terminando no corrente. Mês sem lançamento fica zerado
+            de propósito — gráfico que inventa dado é pior que gráfico vazio.
+        recentes:
+          type: array
+          items: { $ref: '#/components/schemas/Transacao' }
+        proximosLembretes:
+          type: array
+          items: { $ref: '#/components/schemas/Lembrete' }
+
+    ConexaoOpenFinance:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+        institution_name: { type: [string, 'null'] }
+        status: { type: string, example: UPDATED }
+        execution_status: { type: [string, 'null'], example: SUCCESS }
+        last_updated_at: { type: [string, 'null'], format: date-time }
+
+    ResultadoSincronizacao:
+      type: object
+      properties:
+        ok: { type: boolean }
+        contas: { type: integer, description: Contas processadas. }
+        transacoes: { type: integer, description: Transações vistas na varredura. }
+        novos:
+          type: integer
+          description: |
+            Quantas eram inéditas. Só estas acionam as regras de negócio —
+            aporte em meta, baixa em lembrete, notificação —, que têm efeito
+            colateral e não são idempotentes.
+
+    PoliticaDeVersao:
+      type: object
+      required: [maisRecente, minimaSuportada, decisao]
+      properties:
+        maisRecente:
+          type: string
+          description: Última versão publicada na loja.
+        minimaSuportada:
+          type: string
+          description: Abaixo disto a API recusa atender com 426.
+        versaoRecebida:
+          type: [string, 'null']
+          description: Eco do cabeçalho enviado, para depurar cliente mal configurado.
+        decisao:
+          type: string
+          enum: [em-dia, sugerida, obrigatoria]
+          description: |
+            `sugerida` exibe aviso dispensável; `obrigatoria` bloqueia a entrada.
+            A mesma função que decide isto roda no servidor — duas
+            implementações divergiriam.
+        loja:
+          type: object
+          properties:
+            android: { type: string, format: uri }
+            ios: { type: string, format: uri }
+
+    EventoPluggy:
+      type: object
+      properties:
+        id: { type: string }
+        event:
+          type: string
+          enum:
+            - item/created
+            - item/updated
+            - item/error
+            - item/deleted
+            - transactions/created
+            - transactions/updated
+        itemId: { type: string }

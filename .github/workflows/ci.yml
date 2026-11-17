@@ -45,6 +45,13 @@ jobs:
       # aplica os limites de cobertura declarados em vitest.config.ts. Ficar
       # abaixo do limite reprova o job, entao a cobertura e verificada a cada
       # push em vez de ser um numero que alguem olha de vez em quando.
+      # O contrato da API e verificado antes dos testes: especificacao
+      # invalida nao deve nem chegar a ser comparada com o codigo. Os testes
+      # em tests/contrato/ fazem a outra metade — garantem que o documento
+      # nao divergiu das rotas que existem de fato.
+      - name: Validate API contract (OpenAPI)
+        run: npm run api:validar
+
       - name: Run tests with coverage (Vitest)
         run: npm run test:cov
 
